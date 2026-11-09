@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=75,<81"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smtp-proxy"
+version = "1.0.0"
+description = "Local SMTP relay with Qt6 administration and Windows service"
+requires-python = ">=3.12"
+authors = [{name = "Marcel Braun", email = "marcel.braun@ferchau.com"}]
+dependencies = [
+  "aiosmtpd==1.4.6", "python-dotenv==1.1.1", "PySide6==6.9.3",
+  "pywin32==311; sys_platform == 'win32'",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==8.4.2", "pytest-qt==4.5.0", "ruff==0.13.3", "trustme==1.2.1"]
+build = ["pyinstaller==6.16.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+qt_api = "pyside6"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

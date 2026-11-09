@@ -1,0 +1,1 @@
+"""Qt administration interface, independent of the SMTP listener."""
