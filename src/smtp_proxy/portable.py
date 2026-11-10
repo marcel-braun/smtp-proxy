@@ -1,6 +1,7 @@
 import errno
-import msvcrt
 from contextlib import contextmanager
+
+from smtp_proxy import file_lock
 
 
 class RuntimeActiveError(RuntimeError):
@@ -12,16 +13,16 @@ def idle_runtime(directory):
     with (directory / "runtime.lock").open("a+b") as stream:
         stream.seek(0)
         try:
-            msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            file_lock.acquire(stream)
         except OSError as error:
-            if error.errno in {errno.EACCES, errno.EDEADLK}:
+            if error.errno in {errno.EACCES, errno.EDEADLK, errno.EAGAIN}:
                 raise RuntimeActiveError("CLI zuerst beenden.") from None
             raise
         try:
             yield
         finally:
             stream.seek(0)
-            msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            file_lock.release(stream)
 
 
 def runtime_status(directory):

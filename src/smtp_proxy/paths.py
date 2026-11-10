@@ -24,6 +24,8 @@ def service_settings_path(data_directory: Path) -> Path:
 def default_portable_dir() -> Path | None:
     if not getattr(sys, "frozen", False):
         return application_dir()
+    if sys.platform != "win32":
+        return application_dir()
     from win32com.shell import shell, shellcon
 
     directory = application_dir()

@@ -1,3 +1,7 @@
+import sys
+
+import pytest
+
 from smtp_proxy import paths
 
 
@@ -9,6 +13,7 @@ def test_source_portable_directory_is_project_root(monkeypatch, tmp_path):
     assert (before / "app_gui.py").is_file()
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows known folders require Windows")
 def test_frozen_portable_directory(monkeypatch, tmp_path):
     from win32com.shell import shell
 
@@ -18,6 +23,14 @@ def test_frozen_portable_directory(monkeypatch, tmp_path):
     assert paths.default_portable_dir() == (tmp_path / "portable").resolve()
 
 
+def test_frozen_linux_directory_is_portable(monkeypatch, tmp_path):
+    monkeypatch.setattr(paths.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(paths.sys, "platform", "linux")
+    monkeypatch.setattr(paths.sys, "executable", str(tmp_path / "portable" / "app_cli"))
+    assert paths.default_portable_dir() == (tmp_path / "portable").resolve()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows known folders require Windows")
 def test_frozen_installed_directory_uses_programdata(monkeypatch, tmp_path):
     from win32com.shell import shell
 

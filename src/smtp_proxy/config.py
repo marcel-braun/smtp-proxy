@@ -1,7 +1,9 @@
 import base64
 import binascii
 import io
+import ipaddress
 import os
+import re
 import socket
 import tempfile
 from dataclasses import dataclass, field, fields
@@ -16,9 +18,14 @@ from smtp_proxy.paths import data_dir
 @dataclass(frozen=True)
 class Settings:
     local_port: int = 25
+    allowed_hosts: str = "127.0.0.1, ::1"
+    local_security: str = "none"
+    local_certificate: str = ""
+    local_private_key: str = ""
     upstream_host: str = ""
     upstream_port: int = 587
     upstream_security: str = "starttls"
+    upstream_accept_invalid_certificate: bool = False
     upstream_username: str = ""
     password: str = field(default="", repr=False)
     force_from: str = ""
@@ -31,6 +38,12 @@ class Settings:
     max_queue_bytes: int = 1073741824
 
     def validate(self, *, resolve: bool = False) -> None:
+        allowed_networks(self.allowed_hosts, resolve=resolve)
+        if self.local_security not in {"none", "starttls", "tls"}:
+            raise ValueError("Unbekannter lokaler TLS-Modus.")
+        if self.local_security != "none":
+            if bool(self.local_certificate) != bool(self.local_private_key):
+                raise ValueError("Eigene TLS-Dateien erfordern Zertifikat und privaten Schluessel (PEM).")
         for port in (self.local_port, self.upstream_port):
             if not 1 <= port <= 65535:
                 raise ValueError("Ports muessen zwischen 1 und 65535 liegen.")
@@ -63,11 +76,37 @@ class Settings:
             if host in {"localhost", "127.0.0.1", "::1"}:
                 raise ValueError("SMTP-Ziel darf nicht der lokale Proxy sein.")
             if resolve:
-                import ipaddress
-
                 addresses = socket.getaddrinfo(host, self.upstream_port)
                 if any(ipaddress.ip_address(item[4][0]).is_loopback for item in addresses):
                     raise ValueError("SMTP-Ziel zeigt auf den lokalen Proxy.")
+
+
+def allowed_networks(value: str, *, resolve: bool = True):
+    entries = value.split(",")
+    if not value.strip() or any(not entry.strip() for entry in entries):
+        raise ValueError("Allowed Hosts muss IP-Adressen, CIDR-Netze oder DNS-Namen enthalten.")
+    networks = []
+    for entry in entries:
+        host = entry.strip()
+        try:
+            networks.append(ipaddress.ip_network(host, strict=False))
+            continue
+        except ValueError:
+            pass
+        labels = host.rstrip(".").split(".")
+        if (len(host) > 253 or not any(char.isalpha() for char in host)
+                or any(not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label)
+                       for label in labels)):
+            raise ValueError(f"Ungueltiger Allowed-Hosts-Eintrag: {host}")
+        if resolve:
+            try:
+                addresses = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+            except OSError as error:
+                raise ValueError(f"Allowed Host kann nicht aufgeloest werden: {host}") from error
+            if not addresses:
+                raise ValueError(f"Allowed Host kann nicht aufgeloest werden: {host}")
+            networks.extend(ipaddress.ip_network(address[4][0]) for address in addresses)
+    return tuple(networks)
 
 
 def validate_address(value: str) -> str:
@@ -110,7 +149,7 @@ def load_settings(path: Path | None = None) -> Settings:
     return Settings(**arguments)
 
 
-def save_settings(settings: Settings, path: Path | None = None) -> None:
+def save_settings(settings: Settings, path: Path | None = None, *, protect=None) -> None:
     settings.validate()
     path = path or data_dir() / ".env"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -131,6 +170,8 @@ def save_settings(settings: Settings, path: Path | None = None) -> None:
             stream.write(output.getvalue())
             stream.flush()
             os.fsync(stream.fileno())
+        if protect is not None:
+            protect(Path(temporary))
         os.replace(temporary, path)
     finally:
         Path(temporary).unlink(missing_ok=True)

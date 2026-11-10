@@ -8,6 +8,10 @@ import types
 from pathlib import Path
 
 import pytest
+
+if sys.platform != "win32":
+    pytest.skip("Windows service tests require Windows", allow_module_level=True)
+
 import pywintypes
 import ntsecuritycon
 import win32service
@@ -128,6 +132,7 @@ def service(monkeypatch):
     instance.ReportServiceStatus = MagicMock()
     instance._configure_log = MagicMock()
     monkeypatch.setattr(host, "verify_data_dir", lambda: Path("C:/protected"))
+    monkeypatch.setattr(host, "service_settings_path", lambda directory: directory / ".env")
     settings = MagicMock()
     monkeypatch.setattr(host, "load_settings", lambda *args: settings)
     monkeypatch.setattr(host.servicemanager, "LogErrorMsg", MagicMock())
@@ -210,6 +215,16 @@ def test_service_rejects_all_users_data_acl(monkeypatch, tmp_path):
     monkeypatch.setattr(win32security, "GetNamedSecurityInfo", lambda *args: descriptor)
     with pytest.raises(PermissionError, match="untrusted account"):
         manager._verify_tree(tmp_path)
+
+
+def test_settings_acl_excludes_standard_users():
+    acl = manager._acl(settings=True)
+    entries = {
+        win32security.ConvertSidToStringSid(acl.GetAce(index)[2]): acl.GetAce(index)[1]
+        for index in range(acl.GetAceCount())
+    }
+    assert set(entries) == {"S-1-5-18", "S-1-5-32-544", "S-1-5-19"}
+    assert entries["S-1-5-19"] == ntsecuritycon.FILE_GENERIC_READ
 
 
 @pytest.fixture

@@ -1,4 +1,5 @@
 import smtplib
+import socket
 import ssl
 from contextlib import contextmanager
 from email import policy
@@ -26,6 +27,9 @@ class UpstreamClient:
         settings = self.settings
         settings.validate(resolve=True)
         context = ssl.create_default_context()
+        if settings.upstream_accept_invalid_certificate:
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
         if settings.upstream_security == "tls":
             client = smtplib.SMTP_SSL(
                 settings.upstream_host, settings.upstream_port,
@@ -64,6 +68,32 @@ class UpstreamClient:
 
 
 def safe_error(error: Exception) -> str:
+    if isinstance(error, ssl.SSLCertVerificationError):
+        detail = error.verify_message or "Zertifikatspruefung fehlgeschlagen"
+        return f"TLS-Zertifikat abgelehnt: {detail} (Code {error.verify_code})"
+    if isinstance(error, ssl.SSLError):
+        detail = error.strerror or "TLS-Verhandlung fehlgeschlagen"
+        return f"TLS-Fehler: {detail}"
+    if isinstance(error, socket.gaierror):
+        detail = error.strerror or "Zielservernamen und DNS-Einstellungen pruefen"
+        return f"DNS-Aufloesung des Zielservers fehlgeschlagen: {detail} (Code {error.errno})"
+    if isinstance(error, smtplib.SMTPAuthenticationError):
+        return f"SMTP-Anmeldung abgelehnt (SMTP {error.smtp_code}); Benutzername und Kennwort pruefen."
     if isinstance(error, smtplib.SMTPResponseException):
         return f"{type(error).__name__} (SMTP {error.smtp_code})"
+    if isinstance(error, PermissionError):
+        if str(error) == "Administrator rights are required.":
+            return "Administratorrechte erforderlich; GUI als Administrator starten."
+        detail = error.strerror or "Zugriff verweigert"
+        code = f" (Windows-Fehler {error.winerror})" if error.winerror else ""
+        return f"{detail}{code}; Datei- und Ordnerberechtigungen pruefen."
+    if isinstance(error, FileNotFoundError):
+        return "Datei oder Ordner nicht gefunden; Installations- und Speicherpfad pruefen."
+    if isinstance(error, TimeoutError):
+        return "Zeitueberschreitung; Server, Port und Netzwerkverbindung pruefen."
+    if isinstance(error, OSError):
+        detail = error.strerror or "Systemfehler beim Zugriff auf Datei oder Netzwerk"
+        code = f" (Windows-Fehler {error.winerror})" if error.winerror else (
+            f" (Fehler {error.errno})" if error.errno else "")
+        return f"{detail}{code}"
     return type(error).__name__

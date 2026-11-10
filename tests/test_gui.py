@@ -7,6 +7,10 @@ from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
+
+if sys.platform != "win32":
+    pytest.skip("Windows service GUI tests require Windows", allow_module_level=True)
+
 from PySide6.QtCore import QThread, QTimer
 from PySide6.QtWidgets import QLabel, QLineEdit, QMessageBox
 
@@ -87,10 +91,10 @@ def admin_env(monkeypatch, isolated):
         assert path == isolated / ".env"
         return REAL_LOAD(path)
 
-    def save(settings, path):
+    def save(settings, path, **kwargs):
         events.append("save")
         assert path == isolated / ".env"
-        REAL_SAVE(settings, path)
+        REAL_SAVE(settings, path, **kwargs)
 
     def startup(enabled):
         events.append(("startup", enabled))
@@ -180,6 +184,14 @@ def test_admin_initializes_before_load_and_all_settings_available(windows, admin
     assert "unverschl\u00fcsselt" in window.inputs["upstream_security"].toolTip()
     window.inputs["max_queue_bytes"].setText("10000000000")
     assert window._settings().max_queue_bytes == 10000000000
+
+
+def test_certificate_override_is_explicit_and_warned(windows, admin_env):
+    window = windows()
+    option = window.inputs["upstream_accept_invalid_certificate"]
+    assert option.text() == "Ungueltige TLS-Zertifikate immer akzeptieren (unsicher)"
+    assert "abgefangen" in option.toolTip()
+    assert not option.isChecked()
 
 
 def test_status_poll_preserves_settings_focus_and_save_button(windows, admin_env, qtbot):

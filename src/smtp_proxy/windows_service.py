@@ -87,7 +87,7 @@ class SMTPProxyService(win32serviceutil.ServiceFramework):
             directory = verify_data_dir()
             self._configure_log(directory)
             settings_path = service_settings_path(directory)
-            if settings_path.parent == application_dir():
+            if settings_path.parent == application_dir() and settings_path.is_file():
                 verify_settings_file(settings_path)
             settings = load_settings(settings_path)
             settings.validate()

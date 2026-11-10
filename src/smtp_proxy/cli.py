@@ -9,7 +9,14 @@ from smtp_proxy.config import load_settings
 from smtp_proxy.paths import default_portable_dir, service_settings_path
 from smtp_proxy.relay import safe_error
 from smtp_proxy.runtime import ProxyRuntime
-from smtp_proxy.service_manager import verify_data_dir
+
+
+def verify_data_dir():
+    if sys.platform != "win32":
+        raise RuntimeError("Der Windows-Dienstmodus ist auf Linux nicht verfuegbar.")
+    from smtp_proxy.service_manager import verify_data_dir as verify_windows_data_dir
+
+    return verify_windows_data_dir()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -22,12 +29,14 @@ def main(argv: list[str] | None = None) -> int:
         help="Verzeichnis mit .env, Queue und Logs; portabel standardmaessig neben der EXE.",
     )
     location.add_argument("--service-mode", action="store_true",
-                          help="Geschuetzte ProgramData-Konfiguration verwenden.")
+                          help="App-Konfiguration neben der EXE, Laufzeitdaten in ProgramData verwenden.")
     parser.add_argument(
         "--check", action="store_true",
         help="Konfiguration pruefen und beenden, ohne Listener oder Worker zu starten.",
     )
     options = parser.parse_args(argv)
+    if options.service_mode and sys.platform != "win32":
+        parser.error("--service-mode ist nur unter Windows verfuegbar.")
     runtime = None
     handlers = {}
     console = None

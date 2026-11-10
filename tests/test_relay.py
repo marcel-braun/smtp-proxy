@@ -1,4 +1,5 @@
 import smtplib
+import socket
 import ssl
 from contextlib import contextmanager
 from unittest.mock import patch
@@ -8,7 +9,7 @@ import trustme
 from aiosmtpd.controller import Controller
 from aiosmtpd.smtp import AuthResult, LoginPassword
 
-from smtp_proxy.relay import UpstreamClient
+from smtp_proxy.relay import UpstreamClient, safe_error
 from test_config import configured
 from test_smtp_server import free_port
 
@@ -77,8 +78,20 @@ def test_bad_password_rejected(tmp_path):
 def test_untrusted_certificate_rejected(tmp_path):
     with destination("tls", tmp_path) as (handler, port, context):
         settings = configured(upstream_host="localhost", upstream_port=port, upstream_security="tls")
-        with pytest.raises(ssl.SSLCertVerificationError):
+        with pytest.raises(ssl.SSLCertVerificationError) as error:
             UpstreamClient(settings).test_connection()
+        assert "TLS-Zertifikat abgelehnt" in safe_error(error.value)
+        assert handler.messages == []
+
+
+@pytest.mark.parametrize("mode", ["starttls", "tls"])
+def test_untrusted_certificate_can_be_accepted_when_explicitly_configured(mode, tmp_path):
+    with destination(mode, tmp_path) as (handler, port, context):
+        settings = configured(
+            upstream_host="127.0.0.1", upstream_port=port, upstream_security=mode,
+            upstream_accept_invalid_certificate=True,
+        )
+        UpstreamClient(settings).test_connection()
         assert handler.messages == []
 
 
@@ -88,3 +101,9 @@ def test_starttls_never_falls_back(tmp_path):
         with pytest.raises(smtplib.SMTPNotSupportedError):
             UpstreamClient(settings).test_connection()
         assert handler.messages == []
+
+
+def test_dns_errors_are_actionable_and_redacted():
+    message = safe_error(socket.gaierror(socket.EAI_NONAME, "Name or service not known"))
+    assert "DNS-Aufloesung" in message
+    assert "Name or service not known" in message

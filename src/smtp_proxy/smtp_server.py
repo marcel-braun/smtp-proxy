@@ -1,12 +1,16 @@
 import asyncio
 import errno
+import ipaddress
 import logging
 import sqlite3
+import ssl
 import threading
 
 from aiosmtpd.controller import Controller
-from aiosmtpd.smtp import SMTP
+from aiosmtpd.smtp import MISSING, SMTP
 
+from smtp_proxy.certificates import ensure_certificate
+from smtp_proxy.config import allowed_networks
 from smtp_proxy.queue_store import QueueFullError
 from smtp_proxy.relay import prepare_message
 
@@ -15,6 +19,19 @@ class LocalSMTPHandler:
     def __init__(self, store, settings):
         self.store = store
         self.settings = settings
+        self.allowed_networks = allowed_networks(settings.allowed_hosts)
+
+    async def handle_MAIL(self, server, session, envelope, address, mail_options):
+        try:
+            peer = ipaddress.ip_address(session.peer[0])
+        except (ValueError, TypeError, IndexError):
+            return "550 5.7.1 Client host not allowed"
+        if isinstance(peer, ipaddress.IPv6Address) and peer.ipv4_mapped:
+            peer = peer.ipv4_mapped
+        if not any(peer in network for network in self.allowed_networks):
+            logging.getLogger("smtp_proxy").warning("SMTP-Client abgelehnt: %s", peer)
+            return "550 5.7.1 Client host not allowed"
+        return MISSING
 
     async def handle_EHLO(self, server, session, envelope, hostname, responses):
         session.host_name = hostname
@@ -55,9 +72,10 @@ class LimitedSMTP(SMTP):
     guard = threading.Lock()
 
     def connection_made(self, transport):
-        self.counted = True
         with self.guard:
-            type(self).active += 1
+            if not getattr(self, "counted", False):
+                self.counted = True
+                type(self).active += 1
             excess = type(self).active > 20
         super().connection_made(transport)
         if excess:
@@ -81,17 +99,31 @@ class LocalServer:
         self.handler = LocalSMTPHandler(store, settings)
         self.settings = settings
         self.controllers = []
+        self.store = store
 
     def start(self):
         logging.getLogger("mail.log").disabled = True
+        if self.settings.local_security not in {"none", "starttls", "tls"}:
+            raise ValueError("Unbekannter lokaler TLS-Modus.")
+        arguments = {}
+        if self.settings.local_security != "none":
+            certificate_path, key_path = ensure_certificate(self.settings, self.store.path.parent)
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
+            context.load_cert_chain(certificate_path, key_path)
+            if self.settings.local_security == "starttls":
+                arguments.update(tls_context=context, require_starttls=True)
+            else:
+                arguments["ssl_context"] = context
         try:
-            for host in ("127.0.0.1", "::1"):
+            for host in ("0.0.0.0", "::1"):
                 controller = LocalController(
                     self.handler, hostname=host, port=self.settings.local_port,
                     enable_SMTPUTF8=False, decode_data=False,
                     data_size_limit=self.settings.max_message_bytes,
                     auth_require_tls=True, auth_required=False,
                     ready_timeout=5,
+                    **arguments,
                 )
                 try:
                     controller.start()

@@ -1,7 +1,7 @@
 import logging
-import msvcrt
 from logging.handlers import RotatingFileHandler
 
+from smtp_proxy import file_lock
 from smtp_proxy.queue_store import QueueStore
 from smtp_proxy.smtp_server import LocalServer
 from smtp_proxy.worker import QueueWorker
@@ -22,7 +22,7 @@ class ProxyRuntime:
         self.lock_file = (self.directory / "runtime.lock").open("a+b")
         self.lock_file.seek(0)
         try:
-            msvcrt.locking(self.lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            file_lock.acquire(self.lock_file)
         except OSError:
             self.lock_file.close()
             self.lock_file = None
@@ -60,6 +60,6 @@ class ProxyRuntime:
             self.log_handler = None
         if self.lock_file:
             self.lock_file.seek(0)
-            msvcrt.locking(self.lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+            file_lock.release(self.lock_file)
             self.lock_file.close()
             self.lock_file = None

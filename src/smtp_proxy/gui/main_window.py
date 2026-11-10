@@ -1,6 +1,7 @@
 import base64
 import os
 import smtplib
+import ssl
 import sys
 import tempfile
 from dataclasses import fields
@@ -9,8 +10,8 @@ from email.errors import HeaderParseError
 from email.message import EmailMessage
 from pathlib import Path
 
-from PySide6.QtCore import QRegularExpression, QThread, QTimer, QUrl, Signal
-from PySide6.QtGui import QDesktopServices, QRegularExpressionValidator
+from PySide6.QtCore import QRegularExpression, QThread, QTimer, Signal
+from PySide6.QtGui import QRegularExpressionValidator
 from PySide6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFormLayout, QHBoxLayout,
     QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QPlainTextEdit,
@@ -18,11 +19,17 @@ from PySide6.QtWidgets import (
     QTabWidget, QVBoxLayout, QWidget,
 )
 
-from smtp_proxy import config, service_manager
-from smtp_proxy.paths import application_dir, service_settings_path
+from smtp_proxy import config
+from smtp_proxy.certificates import certificate_paths
+from smtp_proxy.paths import application_dir, data_dir, service_settings_path
 from smtp_proxy.portable import idle_runtime, runtime_status
 from smtp_proxy.queue_store import QueueStore
 from smtp_proxy.relay import UpstreamClient, safe_error
+
+if sys.platform == "win32":
+    from smtp_proxy import service_manager
+else:
+    service_manager = None
 
 
 STATES = {
@@ -113,7 +120,7 @@ def observe_status(admin, root):
     return snapshot, settings if valid else None, error
 
 
-def restore_config(path, original):
+def restore_config(path, original, *, protect=None):
     if original is None:
         path.unlink(missing_ok=True)
         return
@@ -123,6 +130,8 @@ def restore_config(path, original):
             stream.write(original)
             stream.flush()
             os.fsync(stream.fileno())
+        if protect is not None:
+            protect(Path(temporary))
         os.replace(temporary, path)
     finally:
         Path(temporary).unlink(missing_ok=True)
@@ -130,7 +139,7 @@ def restore_config(path, original):
 
 def persist_settings(settings, *, restart=False):
     settings.validate()
-    root = service_manager.initialize_data_dir()
+    service_manager.initialize_data_dir()
     path = application_dir() / ".env"
     original = path.read_bytes() if path.exists() else None
     state, startup = service_snapshot(True)
@@ -139,8 +148,7 @@ def persist_settings(settings, *, restart=False):
     stage = "Konfiguration speichern"
     startup_attempted = False
     try:
-        config.save_settings(settings, path)
-        service_manager.protect_settings_file(path)
+        config.save_settings(settings, path, protect=service_manager.protect_settings_file)
         if startup is not None:
             stage = "SCM-Autostart setzen"
             startup_attempted = True
@@ -151,9 +159,7 @@ def persist_settings(settings, *, restart=False):
     except Exception as error:
         recovery = []
         try:
-            restore_config(path, original)
-            if path.exists():
-                service_manager.protect_settings_file(path)
+            restore_config(path, original, protect=service_manager.protect_settings_file)
         except Exception as rollback_error:
             recovery.append(f"Konfigurations-Rollback fehlgeschlagen ({safe_error(rollback_error)})")
         if startup_attempted:
@@ -206,7 +212,7 @@ def read_logs(root):
     return "\n\n".join(parts)
 
 
-def send_testmail(settings, recipient, sender, *, portable=False):
+def send_testmail(settings, recipient, sender, *, portable=False, directory=None):
     recipient = config.validate_address(recipient)
     sender = config.validate_address(settings.force_from or sender)
     if not portable and service_manager.status() != "running":
@@ -216,8 +222,19 @@ def send_testmail(settings, recipient, sender, *, portable=False):
     message["To"] = recipient
     message["Subject"] = "SMTPProxy Testmail"
     message.set_content("Testnachricht von SMTPProxy.")
-    with smtplib.SMTP("127.0.0.1", settings.local_port,
-                      timeout=settings.smtp_timeout_seconds) as client:
+    arguments = {"timeout": settings.smtp_timeout_seconds}
+    context = None
+    if settings.local_security != "none":
+        certificate_path, key_path = certificate_paths(settings, directory or data_dir())
+        context = ssl.create_default_context(cafile=str(certificate_path))
+        context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+    smtp_class = smtplib.SMTP
+    if settings.local_security == "tls":
+        smtp_class = smtplib.SMTP_SSL
+        arguments["context"] = context
+    with smtp_class("127.0.0.1", settings.local_port, **arguments) as client:
+        if settings.local_security == "starttls":
+            client.starttls(context=context)
         refused = client.send_message(message, from_addr=sender, to_addrs=[recipient])
         if refused:
             raise OperationError("Der lokale Proxy hat den Empf\u00e4nger abgelehnt.")
@@ -363,7 +380,12 @@ class MainWindow(QMainWindow):
         form = QFormLayout(container)
         labels = {
             "local_port": "Lokaler Port", "upstream_host": "Zielserver",
+            "allowed_hosts": "Erlaubte Client-Hosts",
+            "local_security": "Empfang: Transportsicherheit",
+            "local_certificate": "Empfang: Zertifikat (PEM)",
+            "local_private_key": "Empfang: Privater Schluessel (PEM)",
             "upstream_port": "Zielport", "upstream_security": "Transportsicherheit",
+            "upstream_accept_invalid_certificate": "Zertifikatspruefung",
             "upstream_username": "Benutzername", "password": "Kennwort",
             "force_from": "Fester Absender", "service_autostart": "Dienst-Autostart",
             "smtp_timeout_seconds": "SMTP-Timeout (s)",
@@ -379,15 +401,27 @@ class MainWindow(QMainWindow):
             default = getattr(defaults, name)
             if name == "smtp_timeout_seconds":
                 form.addRow(QLabel("Erweitert"))
-            if name == "upstream_security":
+            if name in {"upstream_security", "local_security"}:
                 widget = QComboBox()
                 for text, value in (("STARTTLS", "starttls"), ("TLS", "tls"),
                                     ("Ohne TLS", "none")):
                     widget.addItem(text, value)
-                widget.setToolTip("Ohne TLS werden SMTP-Zugangsdaten unverschl\u00fcsselt \u00fcbertragen.")
+                widget.setToolTip(
+                    "Ohne TLS werden SMTP-Zugangsdaten unverschl\u00fcsselt \u00fcbertragen."
+                    if name == "upstream_security" else
+                    "STARTTLS ist verpflichtend; TLS verschluesselt bereits den Verbindungsaufbau."
+                )
                 widget.currentIndexChanged.connect(self._mark_dirty)
             elif isinstance(default, bool):
-                widget = QCheckBox("Automatisch starten")
+                text = ("Ungueltige TLS-Zertifikate immer akzeptieren (unsicher)"
+                        if name == "upstream_accept_invalid_certificate" else
+                        "Automatisch starten")
+                widget = QCheckBox(text)
+                if name == "upstream_accept_invalid_certificate":
+                    widget.setToolTip(
+                        "Deaktiviert Zertifikatsketten- und Hostnamenpruefung. "
+                        "Verbindungen koennen dadurch von Dritten abgefangen werden."
+                    )
                 widget.toggled.connect(self._mark_dirty)
             elif name in {"local_port", "upstream_port", "smtp_timeout_seconds"}:
                 widget = QSpinBox()
@@ -403,6 +437,13 @@ class MainWindow(QMainWindow):
                         QRegularExpression("[0-9]+"), widget))
                 widget.textChanged.connect(self._mark_dirty)
             widget.setObjectName(name)
+            if name == "allowed_hosts":
+                widget.setToolTip("Kommagetrennte Quell-IP-Adressen, CIDR-Netze oder DNS-Namen.")
+            elif name in {"local_certificate", "local_private_key"}:
+                widget.setToolTip(
+                    "Beide Felder leer: selbstsigniertes Zertifikat automatisch im Datenverzeichnis. "
+                    "Eigene PEM-Dateien: absolute, fuer das ausfuehrende Konto lesbare Pfade."
+                )
             self.inputs[name] = widget
             if name == "password":
                 widget.setEchoMode(QLineEdit.Password)
@@ -477,11 +518,6 @@ class MainWindow(QMainWindow):
         path = QLabel(str(license_directory()))
         path.setWordWrap(True)
         layout.addWidget(path)
-        row = QHBoxLayout()
-        self._button("licenses", "Lizenzen \u00f6ffnen", QStyle.SP_DirOpenIcon,
-                     self.open_licenses, row)
-        row.addStretch()
-        layout.addLayout(row)
         layout.addStretch()
 
     def _submit(self, operation, callback=None, *, refresh_after=False, status_query=False):
@@ -751,8 +787,12 @@ class MainWindow(QMainWindow):
         if not self._confirm(f"Testmail an {recipient} \u00fcber den lokalen Proxy senden?"):
             return
         settings = self.saved
-        operation = (lambda: send_testmail(settings, recipient, sender, portable=True)) if self.portable else (
-            lambda: send_testmail(settings, recipient, sender))
+
+        def operation():
+            return send_testmail(
+                settings, recipient, sender, portable=self.portable, directory=self.root,
+            )
+
         self._submit(operation,
                      lambda result: QMessageBox.information(
                          self, "Testmail", "Vom lokalen Proxy angenommen; Zustellung ausstehend."),
@@ -819,16 +859,6 @@ class MainWindow(QMainWindow):
                 text = text.replace(secret, "[redigiert]")
                 text = text.replace(base64.b64encode(secret.encode()).decode(), "[redigiert]")
         return text
-
-    def open_licenses(self):
-        path = license_directory()
-
-        def locate():
-            if not path.is_dir():
-                raise OperationError("Lizenzordner fehlt. Erwartet: " + str(path))
-            return path
-
-        self._submit(locate, lambda result: QDesktopServices.openUrl(QUrl.fromLocalFile(str(result))))
 
     def _confirm(self, text):
         return QMessageBox.question(self, "SMTPProxy", text,

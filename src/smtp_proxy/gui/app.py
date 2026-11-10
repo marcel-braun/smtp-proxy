@@ -18,8 +18,10 @@ def main(argv=None):
     location = parser.add_mutually_exclusive_group()
     location.add_argument("--data-dir", type=Path, help="Gemeinsames Datenverzeichnis mit app_cli.exe")
     location.add_argument("--service-mode", action="store_true",
-                          help="Windows-Dienst und geschuetzte ProgramData-Konfiguration verwalten")
+                          help="Windows-Dienst verwalten; App-Konfiguration neben der EXE, Laufzeitdaten in ProgramData")
     arguments = parser.parse_args(argv)
+    if arguments.service_mode and sys.platform != "win32":
+        parser.error("--service-mode ist nur unter Windows verfuegbar.")
     if arguments.smoke_test:
         os.environ["QT_QPA_PLATFORM"] = "offscreen"
     application = QApplication.instance() or QApplication([sys.argv[0]])

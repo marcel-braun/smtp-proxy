@@ -10,6 +10,7 @@ requires-python = ">=3.12"
 authors = [{name = "Marcel Braun", email = "marcel.braun@ferchau.com"}]
 dependencies = [
   "aiosmtpd==1.4.6", "python-dotenv==1.1.1", "PySide6==6.9.3",
+  "cryptography>=44,<47",
   "pywin32==311; sys_platform == 'win32'",
 ]
 

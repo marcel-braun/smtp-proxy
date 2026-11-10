@@ -18,6 +18,7 @@ def context(tmp_path, monkeypatch):
     verify = Mock(return_value=tmp_path)
     monkeypatch.setattr(cli, "verify_data_dir", verify)
     monkeypatch.setattr(cli, "default_portable_dir", lambda: None)
+    monkeypatch.setattr(cli, "service_settings_path", lambda directory: directory / ".env")
     event = Mock()
     monkeypatch.setattr(cli.threading, "Event", Mock(return_value=event))
     return tmp_path, settings, runtime, factory, verify, event
@@ -50,9 +51,18 @@ def test_portable_default_is_shared_directory(context, monkeypatch):
 
 def test_explicit_service_mode_uses_protected_directory(context, monkeypatch):
     _, _, _, _, verify, _ = context
+    monkeypatch.setattr(cli.sys, "platform", "win32")
     monkeypatch.setattr(cli, "default_portable_dir", lambda: pytest.fail("Unexpected portable lookup"))
     assert cli.main(["--service-mode"]) == 0
     verify.assert_called_once_with()
+
+
+def test_linux_rejects_windows_service_mode(monkeypatch, capsys):
+    monkeypatch.setattr(cli.sys, "platform", "linux")
+    with pytest.raises(SystemExit) as error:
+        cli.main(["--service-mode"])
+    assert error.value.code == 2
+    assert "--service-mode ist nur unter Windows verfuegbar" in capsys.readouterr().err
 
 
 def test_check_starts_no_runtime(context):
